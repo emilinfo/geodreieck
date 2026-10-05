@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Geodreieck</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#fff; font-family:system-ui, Arial, sans-serif;
+    touch-action:none; user-select:none; -webkit-user-select:none; }
+  canvas, .layer { position:absolute; left:0; top:0; }
+  #draw { width:100%; height:100%; touch-action:none; }
+  .layer { transform-origin:center center; pointer-events:none; max-width:none; }
+  #bgimg { display:none; }
+  #draw { cursor:crosshair; }
+  .bar, #tools, #settings { background:#fffffff0; border:1px solid #d0d4da; border-radius:12px; box-shadow:0 2px 12px #0002; }
+  .bar { position:absolute; bottom:10px; display:flex; gap:6px; align-items:center; flex-wrap:wrap; z-index:10; padding:8px; }
+  #left { left:10px; right:360px; }
+  #right { right:10px; width:330px; justify-content:flex-end; }
+  #tools { position:absolute; right:10px; top:10px; z-index:10; display:flex; gap:6px; padding:8px; }
+  #info { position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:10; background:#222; color:#fff;
+    padding:4px 12px; border-radius:14px; font-size:14px; pointer-events:none; display:none; }
+  button { font:inherit; font-size:14px; padding:8px 11px; border:1px solid #c3c8d0; background:#f6f7f9; border-radius:8px; cursor:pointer; color:#222; }
+  button:hover { background:#e9ecf0; }
+  button.on { background:#2b3a55; color:#fff; border-color:#2b3a55; }
+  .color { width:34px; height:34px; padding:0; border-radius:50%; border:3px solid #fff; box-shadow:0 0 0 1px #888; }
+  .color.on { box-shadow:0 0 0 3px #2b3a55; }
+  #cpick { width:38px; height:34px; padding:0; border:1px solid #c3c8d0; border-radius:8px; background:none; cursor:pointer; }
+  #settings { position:absolute; left:10px; top:10px; z-index:10; padding:6px 10px; font-size:14px; }
+  #settings label { display:block; cursor:pointer; }
+  #dialog { position:absolute; inset:0; background:#0006; display:none; align-items:center; justify-content:center; z-index:20; }
+  #dialog div { background:#fff; padding:16px; border-radius:8px; display:flex; flex-direction:column; gap:8px; min-width:200px; }
+</style>
+</head>
+<body>
+<canvas id="grid"></canvas>
+<img id="bgimg" class="layer" alt="">
+<canvas id="draw"></canvas>
+<img id="tri" class="layer" src="geodreieck.png" alt="Geodreieck">
+
+<div id="settings"><b>Geodreieck</b>
+  <label><input type="radio" name="size" value="flex"> flexibel</label>
+  <label><input type="radio" name="size" value="fix" checked> feste Größe</label>
+</div>
+
+<div id="info"></div>
+<div id="tools">
+  <button id="triBtn" class="on">Geodreieck</button>
+  <button id="save">Speichern (PNG)</button>
+</div>
+
+<div class="bar" id="left">
+  <button data-mode="free" class="on">Freihand</button>
+  <button data-mode="line">Linie</button>
+  <button data-mode="poly">Vieleck</button>
+  <button data-mode="circle">Kreis</button>
+  <button data-mode="erase">Radierer</button>
+  <button id="bgBtn">Hintergrund</button>
+  <button id="editBg" style="display:none">Bild bewegen</button>
+  <input type="range" id="alpha" min="0" max="1" step="0.05" value="0.5" title="Transparenz Hintergrundbild">
+  <input type="range" id="lw" min="1" max="12" value="3" title="Strichstärke">
+  <button id="undo">Zurück</button>
+  <button id="clear">Löschen</button>
+</div>
+<div class="bar" id="right">
+  <button class="color on" data-c="#000000" style="background:#000"></button>
+  <button class="color" data-c="#e00000" style="background:#e00000"></button>
+  <button class="color" data-c="#0050e0" style="background:#0050e0"></button>
+  <button class="color" data-c="#ff8c00" style="background:#ff8c00"></button>
+  <button class="color" data-c="#1a9a3a" style="background:#1a9a3a"></button>
+  <button class="color" data-c="#8a2be2" style="background:#8a2be2"></button>
+  <input type="color" id="cpick" value="#ff00aa" title="Eigene Farbe">
+</div>
+
+<div id="dialog"><div>
+  <b>Hintergrund</b>
+  <button data-bg="grid">Karopapier</button>
+  <button data-bg="white">Weiß</button>
+  <button data-bg="image">Bild laden</button>
+  <button data-bg="cancel">Abbrechen</button>
+</div></div>
+<input type="file" id="file" accept="image/*" style="display:none">
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const gridC = $('#grid'), drawC = $('#draw'), ctx = drawC.getContext('2d'), gctx = gridC.getContext('2d');
+  const triEl = $('#tri'), bgEl = $('#bgimg');
+
+  // ---------- Zustand ----------
+  const tri = { x: innerWidth / 2, y: innerHeight / 2 + Math.min(560, innerWidth * 0.8) / 4, rot: 0, w: Math.min(560, innerWidth * 0.8) };
+  const bg  = { x: innerWidth / 2, y: innerHeight / 2, rot: 0, w: 600 };
+  let triOn = true, mode = 'free', color = '#000000', bgType = 'white', editBg = false;
+  let shapes = [], history = [], cur = null, hover = null;
+  const pointers = new Map();
+  let g = null;           // aktuelle Aktion
+  let alphaMask = null;   // Alphakanal des Geodreiecks (falls lesbar)
+
+  // ---------- Darstellung ----------
+  const triH = () => tri.w * (triEl.naturalHeight || 1) / (triEl.naturalWidth || 1);
+  // Geodreieck: (x,y) = Drehpunkt = 0-cm-Marke (Mitte der unteren Kante); Bild: (x,y) = Mitte
+  function place(el, o, h, pivot) {
+    el.style.width = o.w + 'px';
+    el.style.left = (o.x - o.w / 2) + 'px';
+    el.style.top = (o.y - (pivot ? h : h / 2)) + 'px';
+    el.style.transformOrigin = pivot ? '50% 100%' : '50% 50%';
+    el.style.transform = 'rotate(' + o.rot + 'rad)';
+  }
+  function layout() {
+    place(triEl, tri, triH(), true);
+    if (bgEl.naturalWidth) place(bgEl, bg, bg.w * bgEl.naturalHeight / bgEl.naturalWidth);
+  }
+  function resize() {
+    const d = devicePixelRatio || 1;
+    for (const c of [drawC, gridC]) { c.width = innerWidth * d; c.height = innerHeight * d; c.style.width = innerWidth + 'px'; c.style.height = innerHeight + 'px'; }
+    ctx.setTransform(d, 0, 0, d, 0, 0); gctx.setTransform(d, 0, 0, d, 0, 0);
+    drawGrid(); render();
+  }
+  function drawGrid() {
+    gctx.clearRect(0, 0, innerWidth, innerHeight);
+    gctx.fillStyle = '#fff'; gctx.fillRect(0, 0, innerWidth, innerHeight);
+    if (bgType !== 'grid') return;
+    const s = tri.w / 28;   // Kästchen ~5 mm bei einem 14-cm-Geodreieck
+    gctx.strokeStyle = '#9cc3e6'; gctx.lineWidth = 1; gctx.beginPath();
+    for (let x = 0; x <= innerWidth; x += s) { gctx.moveTo(Math.round(x) + .5, 0); gctx.lineTo(Math.round(x) + .5, innerHeight); }
+    for (let y = 0; y <= innerHeight; y += s) { gctx.moveTo(0, Math.round(y) + .5); gctx.lineTo(innerWidth, Math.round(y) + .5); }
+    gctx.stroke();
+  }
+  function render() {
+    ctx.clearRect(0, 0, innerWidth, innerHeight); $('#info').style.display = 'none';
+    ctx.lineWidth = 3; ctx.lineCap = ctx.lineJoin = 'round';
+    for (const s of shapes) paint(s);
+    if (cur) {
+      let p = cur.shape;
+      if (cur.kind === 'line' && hover) { p = { t: 'line', a: cur.a, b: hover, c: color, w: lineW() }; say('Länge', dist(cur.a, hover)); }
+      if (cur.kind === 'circle' && hover) { p = { t: 'circle', m: cur.m, r: dist(cur.m, hover), c: color, w: lineW() }; say('Radius', dist(cur.m, hover)); }
+      if (cur.kind === 'poly') p = { t: 'poly', pts: hover ? [...cur.pts, hover] : cur.pts, closed: false, c: color, w: lineW() };
+      if (p) paint(p);
+      if (cur.kind === 'poly') { ctx.fillStyle = color; cur.pts.forEach(q => { ctx.beginPath(); ctx.arc(q.x, q.y, 4, 0, 7); ctx.fill(); }); }
+    }
+  }
+  function paint(s) {
+    ctx.strokeStyle = s.c; ctx.lineWidth = s.w || 3; ctx.beginPath();
+    ctx.globalCompositeOperation = s.e ? 'destination-out' : 'source-over';
+    const P = s.pts;
+    if (s.t === 'free' && P.length > 2) {        // weiche Kurve durch die Mittelpunkte
+      ctx.moveTo(P[0].x, P[0].y);
+      for (let i = 1; i < P.length - 1; i++) ctx.quadraticCurveTo(P[i].x, P[i].y, (P[i].x + P[i + 1].x) / 2, (P[i].y + P[i + 1].y) / 2);
+      ctx.lineTo(P[P.length - 1].x, P[P.length - 1].y);
+    } else if (s.t === 'free' || s.t === 'poly') {
+      P.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+      if (s.closed) ctx.closePath();
+      if (s.t === 'free' && P.length === 1) ctx.lineTo(P[0].x + .1, P[0].y);
+    } else if (s.t === 'line') { ctx.moveTo(s.a.x, s.a.y); ctx.lineTo(s.b.x, s.b.y); }
+    else if (s.t === 'circle') ctx.arc(s.m.x, s.m.y, s.r, 0, Math.PI * 2);
+    ctx.stroke(); ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // ---------- Geometrie ----------
+  const lineW = () => (mode === 'erase' ? 4 : 1) * Number($('#lw').value);
+  const say = (l, d) => { const i = $('#info'); i.style.display = 'block'; i.textContent = l + ': ' + (d / (tri.w / 14)).toFixed(1).replace('.', ',') + ' cm'; };
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  function toLocal(p) {
+    const dx = p.x - tri.x, dy = p.y - tri.y, c = Math.cos(-tri.rot), s = Math.sin(-tri.rot);
+    return { x: dx * c - dy * s, y: dx * s + dy * c };
+  }
+  function toWorld(l) {
+    const c = Math.cos(tri.rot), s = Math.sin(tri.rot);
+    return { x: tri.x + l.x * c - l.y * s, y: tri.y + l.x * s + l.y * c };
+  }
+  function onTri(p) {
+    if (!triOn) return false;
+    const l = toLocal(p), w = tri.w, h = triH();
+    if (Math.abs(l.x) > w / 2 || l.y > 0 || l.y < -h) return false;
+    if (alphaMask) {
+      const u = Math.floor((l.x / w + .5) * alphaMask.w), v = Math.floor((l.y / h + 1) * alphaMask.h);
+      return alphaMask.d[(Math.min(v, alphaMask.h - 1) * alphaMask.w + Math.min(u, alphaMask.w - 1)) * 4 + 3] > 20;
+    }
+    return true;
+  }
+  // Einrasten an der unteren Kante (außen anliegend)
+  function edgeSnap(p, reach) {
+    if (!triOn) return null;
+    const l = toLocal(p), h = triH();
+    if (l.y > -4 && l.y < reach && Math.abs(l.x) <= tri.w / 2 + reach)
+      return toWorld({ x: l.x, y: 0 });
+    return null;
+  }
+
+  // ---------- Verlauf ----------
+  const snap = o => ({ ...o });
+  function setupMask() {
+    try {
+      const c = document.createElement('canvas'); c.width = 120; c.height = Math.max(1, Math.round(120 * triEl.naturalHeight / triEl.naturalWidth));
+      const x = c.getContext('2d'); x.drawImage(triEl, 0, 0, c.width, c.height);
+      alphaMask = { d: x.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height };
+    } catch (e) { alphaMask = null; }
+  }
+  triEl.onload = () => { setupMask(); layout(); };
+  if (triEl.complete && triEl.naturalWidth) { setupMask(); layout(); }
+
+  // ---------- Zeigerbedienung ----------
+  const pt = e => ({ x: e.clientX, y: e.clientY });
+  drawC.addEventListener('pointerdown', e => {
+    e.preventDefault(); drawC.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, pt(e));
+    if (pointers.size >= 2) { startTwo(); return; }
+    const p = pt(e), target = editBg ? bg : (onTri(p) ? tri : null);
+    if (target) {
+      g = { kind: 'move', o: target, prev: snap(target), off: { x: p.x - target.x, y: p.y - target.y } };
+    } else if (mode === 'free' || mode === 'erase') {
+      const s = edgeSnap(p, 30), start = s || p;
+      const shape = { t: 'free', pts: [start], c: color, w: lineW(), e: mode === 'erase' };
+      cur = { kind: 'free', shape };
+      g = { kind: 'free', ruler: !!s };
+    } else {
+      g = { kind: 'tap', start: p, moved: false };
+    }
+    render();
+  });
+  drawC.addEventListener('pointermove', e => {
+    if (!pointers.has(e.pointerId)) { hover = pt(e); if (cur && cur.kind !== 'free') render(); return; }
+    pointers.set(e.pointerId, pt(e));
+    const p = pt(e);
+    if (!g) return;
+    if (g.kind === 'two') return doTwo();
+    if (g.kind === 'move') { g.o.x = p.x - g.off.x; g.o.y = p.y - g.off.y; layout(); }
+    else if (g.kind === 'free') {
+      if (g.ruler) { const s = edgeSnap(p, 1e9); const q = s || p; const l = toLocal(p); const h = triH();
+        const proj = toWorld({ x: Math.max(-tri.w / 2 - 40, Math.min(tri.w / 2 + 40, l.x)), y: 0 });
+        cur.shape.pts = [cur.shape.pts[0], proj]; }
+      else cur.shape.pts.push(p);
+      render();
+    } else if (g.kind === 'tap') {
+      if (dist(p, g.start) > 6) g.moved = true;
+      hover = snapPoint(p); render();
+    }
+  });
+  const end = e => {
+    if (!pointers.has(e.pointerId)) return;
+    const p = pt(e); pointers.delete(e.pointerId);
+    if (g && g.kind === 'two') { if (pointers.size < 2) finishMove(); return; }
+    if (!g) return;
+    if (g.kind === 'move') finishMove();
+    else if (g.kind === 'free') {
+      shapes.push(cur.shape); history.push({ k: 'shape' }); cur = null; g = null; render();
+    } else if (g.kind === 'tap') {
+      const tapped = !g.moved; g = null;
+      if (tapped && e.type === 'pointerup') addPoint(snapPoint(p));
+    }
+    g = null;
+  };
+  drawC.addEventListener('pointerup', end);
+  drawC.addEventListener('pointercancel', end);
+  function snapPoint(p) { return edgeSnap(p, 15) || p; }
+
+  function finishMove() {
+    if (g && g.prev && (g.o.x !== g.prev.x || g.o.y !== g.prev.y || g.o.rot !== g.prev.rot || g.o.w !== g.prev.w))
+      history.push({ k: g.o === bg ? 'bg' : 'tri', prev: g.prev });
+    if (g && g.o === tri && bgType === 'grid') drawGrid();
+    g = null; pointers.clear();
+  }
+  function startTwo() {
+    if (g && g.kind === 'free') { cur = null; }     // angefangenen Strich verwerfen
+    if (g && g.kind === 'move') finishMove();
+    const [a, b] = [...pointers.values()], o = editBg ? bg : tri;
+    g = { kind: 'two', o, prev: snap(o), start: snap(o),
+      d0: dist(a, b) || 1, a0: Math.atan2(b.y - a.y, b.x - a.x), m0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+    render();
+  }
+  function doTwo() {
+    const [a, b] = [...pointers.values()], s = g.start, o = g.o;
+    const d = dist(a, b) || 1, ang = Math.atan2(b.y - a.y, b.x - a.x), m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const da = ang - g.a0, k = flexible() || o === bg ? d / g.d0 : 1;
+    o.rot = s.rot + da; o.w = Math.max(60, s.w * k);
+    const vx = s.x - g.m0.x, vy = s.y - g.m0.y, c = Math.cos(da), sn = Math.sin(da);
+    o.x = m.x + k * (vx * c - vy * sn); o.y = m.y + k * (vx * sn + vy * c);
+    layout();
+  }
+  const flexible = () => document.querySelector('input[name=size]:checked').value === 'flex';
+  let wheelTimer = null;
+  drawC.addEventListener('wheel', e => {
+    e.preventDefault();
+    const o = editBg ? bg : tri;
+    if (!wheelTimer) history.push({ k: o === bg ? 'bg' : 'tri', prev: snap(o) });
+    clearTimeout(wheelTimer); wheelTimer = setTimeout(() => wheelTimer = null, 400);
+    o.rot += e.deltaY * 0.002; layout();
+  }, { passive: false });
+
+  // ---------- Linie / Vieleck / Kreis ----------
+  function addPoint(p) {
+    if (mode === 'line') {
+      if (!cur) cur = { kind: 'line', a: p };
+      else { shapes.push({ t: 'line', a: cur.a, b: p, c: color, w: lineW() }); history.push({ k: 'shape' }); cur = null; }
+    } else if (mode === 'circle') {
+      if (!cur) cur = { kind: 'circle', m: p };
+      else { shapes.push({ t: 'circle', m: cur.m, r: dist(cur.m, p), c: color, w: lineW() }); history.push({ k: 'shape' }); cur = null; }
+    } else if (mode === 'poly') {
+      if (!cur) cur = { kind: 'poly', pts: [p] };
+      else if (cur.pts.length >= 3 && dist(p, cur.pts[0]) < 20) {
+        shapes.push({ t: 'poly', pts: cur.pts, closed: true, c: color, w: lineW() }); history.push({ k: 'shape' }); cur = null;
+      } else cur.pts.push(p);
+    }
+    render();
+  }
+
+  // ---------- Buttons ----------
+  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => {
+    mode = b.dataset.mode; cur = null; hover = null;
+    document.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('on', x === b)); render();
+  });
+  document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => {
+    color = b.dataset.c; document.querySelectorAll('[data-c]').forEach(x => x.classList.toggle('on', x === b));
+  });
+  $('#undo').onclick = () => {
+    if (cur) { cur = null; render(); return; }     // laufende Linie/Vieleck komplett verwerfen
+    const h = history.pop(); if (!h) return;
+    if (h.k === 'shape') shapes.pop();
+    else if (h.k === 'tri') Object.assign(tri, h.prev);
+    else if (h.k === 'bg') Object.assign(bg, h.prev);
+    layout(); drawGrid(); render();
+  };
+  $('#clear').onclick = () => { shapes = []; cur = null; history = history.filter(h => h.k !== 'shape'); render(); };
+  $('#bgBtn').onclick = () => $('#dialog').style.display = 'flex';
+  $('#dialog').addEventListener('click', e => {
+    const v = e.target.dataset && e.target.dataset.bg; if (!v) return;
+    $('#dialog').style.display = 'none';
+    if (v === 'image') return $('#file').click();
+    if (v === 'cancel') return;
+    bgType = v; bgEl.style.display = 'none'; setEdit(false); $('#editBg').style.display = 'none'; drawGrid();
+  });
+  $('#file').onchange = e => {
+    const f = e.target.files[0]; if (!f) return;
+    bgEl.onload = () => {
+      bg.w = Math.min(innerWidth, 900); bg.x = innerWidth / 2; bg.y = innerHeight / 2; bg.rot = 0;
+      bgEl.style.display = 'block'; bgType = 'image'; drawGrid(); layout();
+      $('#editBg').style.display = ''; setEdit(true);
+    };
+    bgEl.src = URL.createObjectURL(f); e.target.value = '';
+  };
+  function setEdit(v) { editBg = v; $('#editBg').classList.toggle('on', v); $('#editBg').textContent = v ? 'Bild fertig' : 'Bild bewegen'; }
+  $('#editBg').onclick = () => setEdit(!editBg);
+  $('#alpha').oninput = e => bgEl.style.opacity = e.target.value;
+  bgEl.style.opacity = $('#alpha').value;
+
+  document.querySelectorAll('[data-c]').forEach(b => b.addEventListener('click', () => $('#cpick').classList.remove('on')));
+  $('#cpick').oninput = e => { color = e.target.value; document.querySelectorAll('[data-c]').forEach(x => x.classList.remove('on')); };
+  $('#triBtn').onclick = e => { triOn = !triOn; triEl.style.display = triOn ? '' : 'none'; e.target.classList.toggle('on', triOn); };
+  $('#save').onclick = () => {
+    const d = devicePixelRatio || 1, c = document.createElement('canvas'); c.width = innerWidth * d; c.height = innerHeight * d;
+    const x = c.getContext('2d'); x.drawImage(gridC, 0, 0);
+    if (bgType === 'image' && bgEl.naturalWidth) {
+      const h = bg.w * bgEl.naturalHeight / bgEl.naturalWidth;
+      x.save(); x.scale(d, d); x.globalAlpha = Number($('#alpha').value); x.translate(bg.x, bg.y); x.rotate(bg.rot);
+      x.drawImage(bgEl, -bg.w / 2, -h / 2, bg.w, h); x.restore();
+    }
+    x.drawImage(drawC, 0, 0);
+    const a = document.createElement('a'); a.download = 'zeichnung.png'; a.href = c.toDataURL('image/png'); a.click();
+  };
+  addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); $('#undo').click(); }
+    else if (e.key === 'Escape' && cur) { cur = null; render(); }
+  });
+  addEventListener('resize', resize);
+  resize(); layout();
+})();
+</script>
+</body>
+</html>

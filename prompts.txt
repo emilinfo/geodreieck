@@ -1,0 +1,4 @@
+Ich habe die Geodreieck-Datei geodreick.png
+ich will html css javascript, alles in einer datei 
+Dateiname: geodreieck.html
+Die geodreieck.png soll in geodreieck.html dargestellt werden.
